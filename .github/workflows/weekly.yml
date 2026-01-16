@@ -6,6 +6,9 @@ on:
     - cron: "0 13 * * 5"
     - cron: "0 14 * * 5"
 
+env:
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
 jobs:
   run-digest:
     runs-on: ubuntu-latest
