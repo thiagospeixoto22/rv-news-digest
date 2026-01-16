@@ -1,60 +1,92 @@
 # sources.py
+import urllib.parse
+
+# Keep your direct sources here (RSS when possible, HTML scrape when needed).
+# NOTE: Some sites may block scraping or change markup; Google News RSS will still cover most items.
 SOURCES = [
-    # --- Industry news sources ---
-    # RVBusiness pages exist (we'll scrape HTML). :contentReference[oaicite:2]{index=2}
+    # RVBusiness (HTML scrape)
     {"name": "RVBusiness - Today's News", "type": "html_rvbusiness", "url": "https://rvbusiness.com/todays-news/"},
     {"name": "RVBusiness - Today's Industry News", "type": "html_rvbusiness", "url": "https://rvbusiness.com/category/todays-industry-news/"},
 
-    # Woodall's supports RSS (their article URLs include rss params). :contentReference[oaicite:3]{index=3}
-    {"name": "Woodall's Campground Magazine", "type": "rss_guess", "url": "https://woodallscm.com/feed/"},
+    # Woodall’s (RSS)
+    {"name": "Woodall's Campground Magazine", "type": "rss", "url": "https://woodallscm.com/feed/"},
 
-    # Modern Campground is WordPress-like and supports category feeds; /feed is commonly available.
-    {"name": "Modern Campground", "type": "rss_guess", "url": "https://moderncampground.com/feed/"},
+    # Modern Campground (RSS)
+    {"name": "Modern Campground", "type": "rss", "url": "https://moderncampground.com/feed/"},
 
-    # KOA press releases page (scrape) :contentReference[oaicite:4]{index=4}
-    {"name": "KOA Press Releases", "type": "html_koa_press", "url": "https://www.koapressroom.com/press-releases/"},
+    # KOA press releases (HTML scrape)
+    {"name": "KOA Press Releases", "type": "html_simple_dates", "url": "https://www.koapressroom.com/press-releases/"},
 
-    # Public company IR pages (scrape)
-    # Sun Communities news releases :contentReference[oaicite:5]{index=5}
-    {"name": "Sun Communities News Releases", "type": "html_sun_news", "url": "https://www.suninc.com/news-releases"},
-    # ELS investor relations news :contentReference[oaicite:6]{index=6}
-    {"name": "ELS IR News", "type": "html_els_news", "url": "https://equitylifestyle.gcs-web.com/news"},
+    # Public company IR news pages (HTML scrape)
+    {"name": "Sun Communities News Releases", "type": "html_simple_dates", "url": "https://www.suninc.com/news-releases"},
+    {"name": "ELS IR News", "type": "html_simple_dates", "url": "https://equitylifestyle.gcs-web.com/news"},
 ]
 
-# ---- Google News RSS searches (for “hard to source” topics) ----
-# Undocumented by Google, but widely used; Feedly shows example syntax incl. when: :contentReference[oaicite:7]{index=7}
+# Google News RSS searches for "hard-to-source" categories.
+# We keep the edition as US English via hl/gl/ceid in the URL builder.
+# Tightened queries + explicit RV-park/campground terms + exclusions for vehicle/travel noise.
 GOOGLE_NEWS_QUERIES = [
     {
-        "name": "RV Parks - Acquisitions & For Sale",
-        "q": '(rv park OR rv resort OR campground OR "outdoor hospitality") (acquisition OR acquired OR sale OR "for sale" OR broker OR transaction OR portfolio) when:7d'
+        "name": "US RV Parks - Acquisitions / For Sale",
+        "q": (
+            '("rv park" OR "rv resort" OR campground OR "rv campground" OR campgrounds) '
+            '(acquisition OR acquired OR "for sale" OR listing OR broker OR transaction OR portfolio OR "sale-leaseback") '
+            '(United States OR U.S. OR USA OR county OR city OR state) '
+            '-motorhome -"travel trailer" -"fifth wheel" -airstream -campervan -vanlife -pickup -tow -dealership '
+            'when:7d'
+        ),
     },
     {
-        "name": "RV Parks - Insurance / Risk",
-        "q": '(rv park OR campground OR rv resort) (insurance OR insurer OR premium OR wildfire OR flood OR liability OR claims) when:7d'
+        "name": "US RV Parks - Insurance / Risk",
+        "q": (
+            '("rv park" OR "rv resort" OR campground OR "rv campground" OR campgrounds) '
+            '(insurance OR insurer OR premium OR underwriting OR liability OR wildfire OR flood OR hurricane OR claims) '
+            '(United States OR U.S. OR USA OR state) '
+            '-motorhome -"travel trailer" -"fifth wheel" -airstream -campervan -vanlife -pickup -tow '
+            'when:7d'
+        ),
     },
     {
-        "name": "RV Parks - Legal / Zoning / Regulation",
-        "q": '(rv park OR campground OR rv resort) (zoning OR ordinance OR lawsuit OR litigation OR permit OR planning commission OR "code enforcement") when:7d'
+        "name": "US RV Parks - Legal / Lawsuits / Zoning",
+        "q": (
+            '("rv park" OR "rv resort" OR campground OR "rv campground" OR campgrounds) '
+            '(zoning OR ordinance OR lawsuit OR litigation OR permit OR "planning commission" OR "code enforcement") '
+            '(United States OR U.S. OR USA OR state OR county OR city) '
+            '-motorhome -"travel trailer" -"fifth wheel" -airstream -campervan -vanlife '
+            'when:7d'
+        ),
     },
     {
-        "name": "RV Parks - Financing / Rates / Debt",
-        "q": '(rv park OR campground OR rv resort) (financing OR loan OR lender OR cap rate OR refinancing OR debt) when:7d'
+        "name": "US RV Parks - Financing / Rates / Debt",
+        "q": (
+            '("rv park" OR "rv resort" OR campground OR "rv campground" OR campgrounds) '
+            '(financing OR refinance OR refinancing OR loan OR lender OR debt OR cap rate OR "interest rate") '
+            '(United States OR U.S. OR USA) '
+            '-motorhome -"travel trailer" -"fifth wheel" -airstream -campervan -vanlife '
+            'when:7d'
+        ),
     },
     {
-        "name": "SUI / Sun Outdoors",
-        "q": '(Sun Communities OR Sun Outdoors OR SUI) (earnings OR guidance OR dividend OR acquisition OR resort OR campground) when:14d'
+        "name": "Sun / ELS - Outdoor Hospitality Mentions",
+        "q": (
+            '("Sun Communities" OR "Sun Outdoors" OR SUI OR "Equity LifeStyle" OR ELS) '
+            '("rv resort" OR "rv park" OR campground OR "outdoor hospitality") '
+            '(earnings OR guidance OR "press release" OR acquisition OR results OR "conference call") '
+            'when:14d'
+        ),
     },
     {
-        "name": "ELS",
-        "q": '(Equity LifeStyle OR ELS) (earnings OR guidance OR dividend OR acquisition OR RV) when:14d'
-    },
-    {
-        "name": "Campendium / The Dyrt / Campspot",
-        "q": '(Campendium OR "The Dyrt" OR Campspot) (rv park OR campground OR outdoor hospitality) when:14d'
+        "name": "Campendium / The Dyrt - RV Park Related",
+        "q": (
+            '(Campendium OR "The Dyrt") '
+            '("rv park" OR "rv resort" OR campground OR "rv campground" OR campgrounds) '
+            '(United States OR U.S. OR USA) '
+            'when:14d'
+        ),
     },
 ]
 
 def google_news_rss_url(query: str) -> str:
-    # US English edition
-    import urllib.parse
-    return "https://news.google.com/rss/search?q=" + urllib.parse.quote(query) + "&hl=en-US&gl=US&ceid=US:en"
+    # US edition bias
+    base = "https://news.google.com/rss/search?q="
+    return base + urllib.parse.quote(query) + "&hl=en-US&gl=US&ceid=US:en"
