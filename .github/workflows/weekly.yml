@@ -6,8 +6,6 @@ on:
     - cron: "0 13 * * 5"
     - cron: "0 14 * * 5"
 
-env:
-
 jobs:
   run-digest:
     runs-on: ubuntu-latest
