@@ -207,12 +207,14 @@ def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
     return "\n".join(parts)
 
 def send_email(subject: str, html_body: str):
-    smtp_host = os.environ["SMTP_HOST"]
+    smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    username = os.environ["athenanewsai@gmail.com"]
-    password = os.environ["gxiv uhst zirp jfrs"]
-    to_email = os.environ["thiagospeixoto22@gmail.com"]
-    from_email = os.environ.get("athenanewsai@gmail.com", username)
+
+    username = os.environ["SMTP_USERNAME"]
+    password = os.environ["SMTP_PASSWORD"]
+
+    to_email = os.environ["TO_EMAIL"]
+    from_email = os.environ.get("FROM_EMAIL", username)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -225,6 +227,7 @@ def send_email(subject: str, html_body: str):
         server.starttls(context=context)
         server.login(username, password)
         server.sendmail(from_email, [to_email], msg.as_string())
+
 
 def collect_all(days: int = 7) -> List[Item]:
     out: List[Item] = []
