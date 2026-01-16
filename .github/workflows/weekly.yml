@@ -3,9 +3,6 @@ name: Weekly RV Digest
 on:
   workflow_dispatch:
   schedule:
-    # GitHub schedules run at specific UTC times. :contentReference[oaicite:0]{index=0}
-    # Run at both 13:00 and 14:00 UTC Fridays to cover DST shifts,
-    # and let the script decide whether it's the right local time.
     - cron: "0 13 * * 5"
     - cron: "0 14 * * 5"
 
@@ -14,10 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4 :contentReference[oaicite:1]{index=1}
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v5 :contentReference[oaicite:2]{index=2}
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
