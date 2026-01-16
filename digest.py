@@ -227,7 +227,7 @@ def send_email(subject: str, html_body: str):
         server.starttls(context=context)
         server.login(username, password)
         server.sendmail(from_email, [to_email], msg.as_string())
-
+    print("EMAIL_SENT_OK")
 
 def collect_all(days: int = 7) -> List[Item]:
     out: List[Item] = []
