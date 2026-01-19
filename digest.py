@@ -341,6 +341,26 @@ def fallback_category_summary(category: str, items: List[Item]) -> str:
 
     return f"This week’s headlines suggest {theme_txt}.{state_txt}"
 
+IMPORTANT_TERMS = [
+    "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
+    "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
+    "insurance", "premium", "underwriting", "liability", "claims",
+    "financing", "refinance", "loan", "lender", "debt", "cap rate", "interest rate",
+    "earnings", "guidance", "results", "10-q", "10-k", "8-k",
+    "bankruptcy", "foreclosure", "default",
+]
+
+def importance_score(it: Item) -> int:
+    t = (it.title + " " + (it.summary or "")).lower()
+    score = 0
+    for w in IMPORTANT_TERMS:
+        if w in t:
+            score += 2
+    # slight bump for major operators
+    if any(x in t for x in ["sun communities", "sun outdoors", "equity lifestyle", "els", "koa"]):
+        score += 2
+    return score
+
 def ai_category_summary(category: str, items: List[Item]) -> str:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
@@ -350,47 +370,47 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
     client = OpenAI(api_key=api_key)
 
-    # Send only top N items to keep cost low, but include short snippet for better theme detection
-    items_sorted = sorted(items, key=lambda x: x.published, reverse=True)[:12]
+    # Pick top headlines by importance (not per-article summary; just selecting what matters)
+    ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
+
+    # Keep inputs small but informative
+    top = ranked[:10]  # model should infer themes from these
     lines = []
-    for it in items_sorted:
-        d = it.published.astimezone(ET).strftime("%b %d, %Y")
-        snippet = (it.summary or "").strip()
-        snippet = re.sub(r"\s+", " ", snippet)
-        snippet = snippet[:220]  # short context only
+    for it in top:
+        d = it.published.astimezone(ET).strftime("%b %d")
+        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())
+        snippet = snippet[:180]
         lines.append(f"- {d} | {it.source} | {it.title} | {snippet}")
 
     prompt = (
-        "You write concise executive digests for Athena Real Estate.\n"
-        "Scope: STRICTLY US RV parks / RV resorts / campgrounds (industry, real estate, ops, legal, insurance, financing).\n"
+        "You are writing an EXECUTIVE SUMMARY for a weekly digest.\n"
+        "Audience: Athena Real Estate (US RV parks / RV resorts / campgrounds).\n"
+        "Scope: STRICTLY US RV park/campground business + real estate + operations + legal + insurance + financing.\n\n"
         f"Category: {category}\n\n"
-        "Task: Write a CATEGORY-LEVEL summary of the set of headlines.\n"
+        "Task:\n"
+        "- Write a short executive summary that synthesizes the TOP headlines.\n"
+        "- Do NOT summarize each article.\n\n"
+        "Output format (follow exactly):\n"
+        "1) 2–3 sentences that summarize the key developments/themes.\n"
+        "2) Then a line starting with 'Notable:' followed by 1–2 short headline mentions (titles only, no links).\n\n"
         "Rules:\n"
-        "- Output EXACTLY 1–2 sentences (no bullets).\n"
-        "- Do NOT summarize each article one-by-one.\n"
-        "- Focus on themes/patterns (what’s going on overall).\n"
-        "- If location shows up, mention states only if clearly supported.\n"
-        "- No links, no source names, no fluff.\n\n"
-        "Items:\n" + "\n".join(lines)
+        "- Max 70 words total.\n"
+        "- Mention states only if clearly supported by the headlines.\n"
+        "- No sources, no links, no fluff, no speculation.\n\n"
+        "Headlines:\n" + "\n".join(lines)
     )
 
     try:
         resp = client.responses.create(
             model=model,
             input=prompt,
-            max_output_tokens=90,
+            max_output_tokens=140,
         )
         text = (resp.output_text or "").strip()
         text = BeautifulSoup(text, "lxml").get_text(" ", strip=True)
-
-        # Guard: if it returns nothing, treat as failure so fallback is used
-        if not text:
-            print(f"[WARN] AI returned empty summary for category '{category}'.")
-            return ""
-
         return text
     except Exception as e:
-        print(f"[WARN] AI summary failed for '{category}': {e}")
+        print(f"[WARN] AI executive summary failed for '{category}': {e}")
         return ""
 
 
