@@ -299,16 +299,47 @@ def collect_all(days: int = 7) -> List[Item]:
 # ----------------------------
 
 def fallback_category_summary(category: str, items: List[Item]) -> str:
-    # very short fallback if AI fails
+    """
+    Narrative fallback summary (no AI). Not per-article; category-level themes only.
+    """
     if not items:
-        return "No notable items."
-    top_sources = {}
-    for it in items:
-        top_sources[it.source] = top_sources.get(it.source, 0) + 1
-    major = sorted(top_sources.items(), key=lambda x: x[1], reverse=True)[:2]
-    major_txt = ", ".join([f"{s} ({n})" for s, n in major]) if major else "mixed sources"
-    return f"{len(items)} items this week, mostly from {major_txt}."
+        return "No notable updates surfaced in this category this week."
 
+    text = " ".join((it.title + " " + it.summary) for it in items).lower()
+
+    # Theme flags
+    themes = []
+    if any(k in text for k in ["for sale", "listed", "broker", "portfolio", "acquired", "acquisition", "transaction", "deal"]):
+        themes.append("deal/listing activity")
+    if any(k in text for k in ["insurance", "premium", "underwriting", "liability", "claims", "risk"]):
+        themes.append("insurance/risk")
+    if any(k in text for k in ["lawsuit", "litigation", "zoning", "ordinance", "permit", "planning commission", "code enforcement"]):
+        themes.append("legal/zoning actions")
+    if any(k in text for k in ["financing", "loan", "lender", "refinance", "debt", "cap rate", "interest rate"]):
+        themes.append("financing/markets")
+    if any(k in text for k in ["earnings", "guidance", "conference call", "10-q", "10-k", "8-k", "sec"]):
+        themes.append("public-company/earnings commentary")
+    if any(k in text for k in ["upgrade", "renovation", "expansion", "opens", "new", "booking", "reservation"]):
+        themes.append("operator/operations updates")
+
+    # State mentions (best-effort)
+    found_states = []
+    for it in items:
+        t = " " + it.title.upper() + " "
+        for ab in STATE_ABBR:
+            if f", {ab} " in t or f"({ab})" in t:
+                found_states.append(ab)
+
+    states = []
+    if found_states:
+        # top 3 most mentioned
+        from collections import Counter
+        states = [s for s, _ in Counter(found_states).most_common(3)]
+
+    theme_txt = ", ".join(themes) if themes else "general RV park / campground updates"
+    state_txt = f" Key locations mentioned: {', '.join(states)}." if states else ""
+
+    return f"This week’s headlines suggest {theme_txt}.{state_txt}"
 
 def ai_category_summary(category: str, items: List[Item]) -> str:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -319,25 +350,28 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
     client = OpenAI(api_key=api_key)
 
-    # Keep inputs small: only top N items (titles + source + date)
-    items_sorted = sorted(items, key=lambda x: x.published, reverse=True)[:15]
+    # Send only top N items to keep cost low, but include short snippet for better theme detection
+    items_sorted = sorted(items, key=lambda x: x.published, reverse=True)[:12]
     lines = []
     for it in items_sorted:
         d = it.published.astimezone(ET).strftime("%b %d, %Y")
-        lines.append(f"- {d} | {it.source} | {it.title}")
+        snippet = (it.summary or "").strip()
+        snippet = re.sub(r"\s+", " ", snippet)
+        snippet = snippet[:220]  # short context only
+        lines.append(f"- {d} | {it.source} | {it.title} | {snippet}")
 
     prompt = (
-        "You are writing an executive weekly digest for Athena Real Estate.\n"
-        "Scope: STRICTLY US RV parks / RV resorts / campgrounds (real estate, operations, legal, insurance, financing).\n"
+        "You write concise executive digests for Athena Real Estate.\n"
+        "Scope: STRICTLY US RV parks / RV resorts / campgrounds (industry, real estate, ops, legal, insurance, financing).\n"
         f"Category: {category}\n\n"
-        "Task: Write a VERY SHORT category summary of the set of headlines.\n"
+        "Task: Write a CATEGORY-LEVEL summary of the set of headlines.\n"
         "Rules:\n"
-        "- 1–2 sentences ONLY.\n"
-        "- Do NOT summarize each article.\n"
-        "- Mention themes/patterns (e.g., deal activity, zoning actions, insurance pressure).\n"
-        "- If info is unclear, be cautious.\n"
-        "- No links.\n\n"
-        "Headlines:\n" + "\n".join(lines)
+        "- Output EXACTLY 1–2 sentences (no bullets).\n"
+        "- Do NOT summarize each article one-by-one.\n"
+        "- Focus on themes/patterns (what’s going on overall).\n"
+        "- If location shows up, mention states only if clearly supported.\n"
+        "- No links, no source names, no fluff.\n\n"
+        "Items:\n" + "\n".join(lines)
     )
 
     try:
@@ -347,8 +381,14 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
             max_output_tokens=90,
         )
         text = (resp.output_text or "").strip()
-        # Defensive: strip any HTML
-        return BeautifulSoup(text, "lxml").get_text(" ", strip=True)
+        text = BeautifulSoup(text, "lxml").get_text(" ", strip=True)
+
+        # Guard: if it returns nothing, treat as failure so fallback is used
+        if not text:
+            print(f"[WARN] AI returned empty summary for category '{category}'.")
+            return ""
+
+        return text
     except Exception as e:
         print(f"[WARN] AI summary failed for '{category}': {e}")
         return ""
