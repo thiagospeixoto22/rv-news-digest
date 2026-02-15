@@ -33,9 +33,7 @@ class Item:
     summary: str = ""
 
 
-# ----------------------------
-# STRICT RV-PARK + US FILTER
-# ----------------------------
+# STRICT RV PARK FILTER
 
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
@@ -47,7 +45,6 @@ MUST_HAVE_ANY = [
 ]
 
 REJECT_IF_ANY = [
-    # RV-vehicle/travel content
     "travel trailer", "fifth wheel", "motorhome", "pickup truck", "tow vehicle",
     "airstream", "campervan", "van life", "vanlife",
     "rv review", "rv show", "rv expo", "dealership", "dealer",
@@ -55,7 +52,6 @@ REJECT_IF_ANY = [
     "best rv", "top rv", "rv tips", "rv maintenance",
 ]
 
-# Reject obvious non-US geo signals (this is what will kill Australia/Canada/etc.)
 NON_US_HINTS = [
     "australia", "western australia", "queensland", "new south wales", "victoria (aus)",
     "canada", "ontario", "british columbia", "alberta",
@@ -108,7 +104,7 @@ def is_strict_us_rvpark(item: Item) -> bool:
     text = (f"{item.title} {item.summary}").lower()
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Hard reject non-US signals
+    # Hard reject non US signals
     if any(nu in text for nu in NON_US_HINTS):
         return False
 
@@ -116,11 +112,10 @@ def is_strict_us_rvpark(item: Item) -> bool:
     if not any(k in text for k in MUST_HAVE_ANY):
         return False
 
-    # Reject RV vehicle / travel noise
+    # Reject RV vehicle / travel 
     if any(bad in text for bad in REJECT_IF_ANY):
         return False
 
-    # US-only: require US hint unless it's a known US operator story
     if not any(op in text for op in US_OPERATOR_OK):
         if not any(h in text for h in US_HINTS) and not has_state_abbr(text):
             return False
@@ -128,9 +123,7 @@ def is_strict_us_rvpark(item: Item) -> bool:
     return True
 
 
-# ----------------------------
 # CATEGORY TAGGING
-# ----------------------------
 KEYWORDS = {
     "Acquisitions / For Sale": [
         "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
@@ -172,9 +165,7 @@ def categorize(item: Item) -> List[str]:
     return tags or ["Other"]
 
 
-# ----------------------------
 # FETCH / PARSE HELPERS
-# ----------------------------
 
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -294,9 +285,7 @@ def collect_all(days: int = 7) -> List[Item]:
     return filtered
 
 
-# ----------------------------
 # AI: ONE SUMMARY PER CATEGORY
-# ----------------------------
 
 def fallback_category_summary(category: str, items: List[Item]) -> str:
     """
@@ -370,7 +359,7 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
     client = OpenAI(api_key=api_key)
 
-    # Pick top headlines by importance (not per-article summary; just selecting what matters)
+    # Pick top headlines by importance
     ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
 
     # Keep inputs small but informative
@@ -414,9 +403,7 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
         return ""
 
 
-# ----------------------------
 # EMAIL BUILD / SEND
-# ----------------------------
 
 def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
     now = datetime.now(tz=ET)
@@ -437,13 +424,13 @@ def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
         items = items_by_cat[cat]
         parts.append(f"<h3>{cat} ({len(items)})</h3>")
 
-        # AI category summary (always show something)
+        # AI category summary 
         summary = ai_category_summary(cat, items)
         if not summary:
             summary = fallback_category_summary(cat, items)
         parts.append(f"<p><b>Quick summary:</b> {summary}</p>")
 
-        # Article list (keep your full list feel; adjust count as you like)
+        # Article list 
         parts.append("<ul>")
         for it in sorted(items, key=lambda x: x.published, reverse=True)[:40]:
             d = it.published.astimezone(ET).strftime("%b %d, %Y")
