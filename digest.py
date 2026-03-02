@@ -16,11 +16,19 @@ import feedparser
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 
+from pydantic import BaseModel, Field
+from openai import OpenAI  # openai>=1.0.0
+
 from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
-from openai import OpenAI  # requires openai>=1.0.0
-
 ET = pytz.timezone("America/New_York")
+
+# ============ TUNABLES ============
+MAX_ITEMS_PER_CATEGORY_IN_EMAIL = 35   # keep email readable
+MAX_ITEMS_FOR_AI_EXEC_SUMMARY = 10     # top N used to infer category themes
+AI_ARTICLE_BATCH_SIZE = 12             # summaries per API call (keeps token use sane)
+AI_SNIPPET_CHARS = 220                 # snippet length sent to AI per item
+AI_ARTICLE_SUMMARY_MAX_WORDS = 35      # keep summaries short
 
 
 @dataclass
@@ -35,7 +43,6 @@ class Item:
 # ----------------------------
 # STRICT RV-PARK + US FILTER
 # ----------------------------
-
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
     "rv resort", "rv resorts",
@@ -46,7 +53,6 @@ MUST_HAVE_ANY = [
 ]
 
 REJECT_IF_ANY = [
-    # RV vehicle / travel content
     "travel trailer", "fifth wheel", "motorhome", "pickup truck", "tow vehicle",
     "airstream", "campervan", "van life", "vanlife",
     "rv review", "rv show", "rv expo", "dealership", "dealer",
@@ -54,7 +60,6 @@ REJECT_IF_ANY = [
     "best rv", "top rv", "rv tips", "rv maintenance",
 ]
 
-# Hard reject non-US geo signals
 NON_US_HINTS = [
     "australia", "western australia", "queensland", "new south wales", "victoria",
     "canada", "ontario", "british columbia", "alberta",
@@ -75,7 +80,6 @@ US_HINTS = [
     "united states", "u.s.", "usa", "american",
     "county", "city of", "state of",
 ] + [
-    # state names
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
     "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
     "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
@@ -109,10 +113,8 @@ def is_strict_us_rvpark(item: Item) -> bool:
 
     if any(nu in text for nu in NON_US_HINTS):
         return False
-
     if not any(k in text for k in MUST_HAVE_ANY):
         return False
-
     if any(bad in text for bad in REJECT_IF_ANY):
         return False
 
@@ -126,7 +128,6 @@ def is_strict_us_rvpark(item: Item) -> bool:
 # ----------------------------
 # CATEGORY TAGGING
 # ----------------------------
-
 KEYWORDS = {
     "Acquisitions / For Sale": [
         "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
@@ -171,7 +172,6 @@ def categorize(item: Item) -> List[str]:
 # ----------------------------
 # FETCH / PARSE HELPERS
 # ----------------------------
-
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -190,7 +190,7 @@ def within_days(dt: datetime, days: int) -> bool:
 
 def fetch_url(url: str) -> str:
     headers = {"User-Agent": "Mozilla/5.0 (compatible; AthenaRVNewsBot/1.0)"}
-    r = requests.get(url, headers=headers, timeout=25)
+    r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
     return r.text
 
@@ -219,7 +219,6 @@ def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
     date_regex = re.compile(
         r"\b\d{1,2}/\d{1,2}/\d{2,4}\b|\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},\s+\d{4}\b"
     )
-
     base_host = url.split("/")[2]
 
     for a in soup.select("a"):
@@ -229,19 +228,16 @@ def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
             continue
         if href.startswith("/"):
             href = urljoin(url, href)
-
         if base_host not in href:
             continue
 
-        context = (a.parent.get_text(" ", strip=True) if a.parent else "")[:600]
+        context = (a.parent.get_text(" ", strip=True) if a.parent else "")[:700]
         m = date_regex.search(context)
         if not m:
             continue
-
         published = safe_dt(m.group(0))
         if not published:
             continue
-
         items.append(Item(source=source_name, title=txt, url=href, published=published))
 
     uniq: Dict[str, Item] = {}
@@ -273,7 +269,6 @@ def collect_all(days: int = 7) -> List[Item]:
 
     filtered: List[Item] = []
     seen = set()
-
     for it in out:
         dt = it.published
         if dt.tzinfo is None:
@@ -291,9 +286,8 @@ def collect_all(days: int = 7) -> List[Item]:
 
 
 # ----------------------------
-# EXECUTIVE SUMMARY PER CATEGORY (AI)
+# AI: EXEC SUMMARY + PER-ARTICLE SUMMARIES
 # ----------------------------
-
 IMPORTANT_TERMS = [
     "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
     "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
@@ -315,59 +309,29 @@ def importance_score(it: Item) -> int:
     return score
 
 
-def fallback_exec_summary(category: str, items: List[Item]) -> str:
-    if not items:
-        return "No notable updates surfaced in this category this week."
-    text = " ".join((it.title + " " + it.summary) for it in items).lower()
-    themes = []
-    if any(k in text for k in ["for sale", "listed", "broker", "portfolio", "acquired", "acquisition", "transaction", "deal"]):
-        themes.append("deal/listing activity")
-    if any(k in text for k in ["insurance", "premium", "underwriting", "liability", "claims", "risk"]):
-        themes.append("insurance/risk")
-    if any(k in text for k in ["lawsuit", "litigation", "zoning", "ordinance", "permit", "planning commission", "code enforcement"]):
-        themes.append("legal/zoning actions")
-    if any(k in text for k in ["financing", "loan", "lender", "refinance", "debt", "cap rate", "interest rate"]):
-        themes.append("financing/markets")
-    if any(k in text for k in ["earnings", "guidance", "conference call", "10-q", "10-k", "8-k", "sec"]):
-        themes.append("public-company/earnings commentary")
-    if any(k in text for k in ["upgrade", "renovation", "expansion", "opens", "booking", "reservation"]):
-        themes.append("operator/operations updates")
-    theme_txt = ", ".join(themes) if themes else "general US RV park / campground updates"
-    return f"Headlines this week point to {theme_txt}, with a mix of operator and market developments."
-
-
-def ai_exec_summary(category: str, items: List[Item]) -> str:
+def get_openai_client() -> Optional[OpenAI]:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        print("[WARN] OPENAI_API_KEY missing; AI summaries disabled.")
-        return ""
+        return None
+    return OpenAI(api_key=api_key)
 
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
-    client = OpenAI(api_key=api_key)
 
-    ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
-    top = ranked[:10]
-
+def ai_exec_summary(category: str, items: List[Item], client: OpenAI, model: str) -> str:
+    ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)[:MAX_ITEMS_FOR_AI_EXEC_SUMMARY]
     lines = []
-    for it in top:
+    for it in ranked:
         d = it.published.astimezone(ET).strftime("%b %d")
-        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())[:200]
-        lines.append(f"- {d} | {it.source} | {it.title} | {snippet}")
+        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())[:180]
+        lines.append(f"- {d} | {it.title} | {snippet}")
 
     prompt = (
-        "You are writing an EXECUTIVE SUMMARY for a weekly digest.\n"
-        "Audience: Athena Real Estate.\n"
-        "Scope: STRICTLY US RV parks / RV resorts / campgrounds (real estate, ops, legal, insurance, financing).\n\n"
+        "Write an executive summary for Athena Real Estate.\n"
+        "Scope: STRICTLY US RV parks / RV resorts / campgrounds.\n"
         f"Category: {category}\n\n"
-        "Task:\n"
-        "- Synthesize the TOP headlines into a short executive summary.\n"
-        "- Do NOT summarize each article one-by-one.\n\n"
-        "Output format (follow exactly):\n"
-        "Summary: <2–3 sentences, max 55 words>\n"
+        "Output format:\n"
+        "Summary: <2 sentences max>\n"
         "Notable: <1–2 titles only>\n\n"
-        "Rules:\n"
-        "- No links. No sources. No fluff. No speculation.\n"
-        "- Mention states only if clearly supported.\n\n"
+        "Rules: No links. No sources. No fluff. No speculation.\n\n"
         "Headlines:\n" + "\n".join(lines)
     )
 
@@ -378,18 +342,83 @@ def ai_exec_summary(category: str, items: List[Item]) -> str:
             max_output_tokens=160,
         )
         text = (resp.output_text or "").strip()
-        text = BeautifulSoup(text, "lxml").get_text(" ", strip=True)
-        return text
+        return BeautifulSoup(text, "lxml").get_text(" ", strip=True)
     except Exception as e:
         print(f"[WARN] AI exec summary failed for '{category}': {e}")
         return ""
 
 
+# Structured output models for per-article summaries
+class ArticleSummaryOut(BaseModel):
+    url: str = Field(..., description="Exact URL from input")
+    summary: str = Field(..., description="1–2 sentence summary (<=35 words), no links")
+
+
+class ArticleSummaryBatchOut(BaseModel):
+    summaries: List[ArticleSummaryOut]
+
+
+def ai_article_summaries(items: List[Item], client: OpenAI, model: str) -> Dict[str, str]:
+    """
+    Returns {url: summary} for the given items.
+    Uses structured outputs via responses.parse for reliable JSON-schema-constrained output. :contentReference[oaicite:1]{index=1}
+    """
+    if not items:
+        return {}
+
+    # Build compact input
+    blocks = []
+    for it in items:
+        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())[:AI_SNIPPET_CHARS]
+        blocks.append(
+            f"URL: {it.url}\n"
+            f"TITLE: {it.title}\n"
+            f"SNIPPET: {snippet}\n"
+        )
+
+    system = (
+        "You summarize US RV park / campground news for executives.\n"
+        "Return a 1–2 sentence summary for each item.\n"
+        "Rules:\n"
+        f"- Max {AI_ARTICLE_SUMMARY_MAX_WORDS} words per summary.\n"
+        "- No links.\n"
+        "- Do not invent facts not supported by TITLE/SNIPPET.\n"
+        "- If the snippet is thin, write a cautious summary like 'Headline indicates ...'.\n"
+    )
+    user = "Summarize each item:\n\n" + "\n---\n".join(blocks)
+
+    try:
+        # responses.parse enforces the schema (structured outputs)
+        resp = client.responses.parse(
+            model=model,
+            input=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            text_format=ArticleSummaryBatchOut,
+        )
+        parsed: ArticleSummaryBatchOut = resp.output_parsed
+        out = {}
+        for s in parsed.summaries:
+            out[s.url] = BeautifulSoup((s.summary or "").strip(), "lxml").get_text(" ", strip=True)
+        return out
+    except Exception as e:
+        print(f"[WARN] AI article summaries failed: {e}")
+        return {}
+
+
+def chunked(lst: List[Item], n: int) -> List[List[Item]]:
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
+
+
 # ----------------------------
 # EMAIL BUILD / SEND (MULTI-RECIPIENT)
 # ----------------------------
-
-def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
+def build_email_html(
+    items_by_cat: Dict[str, List[Item]],
+    exec_summaries: Dict[str, str],
+    article_summaries: Dict[str, str],
+) -> str:
     now = datetime.now(tz=ET)
     start = (now - timedelta(days=7)).strftime("%b %d, %Y")
     end = now.strftime("%b %d, %Y")
@@ -404,24 +433,23 @@ def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
         return "\n".join(parts)
 
     for cat in sorted(items_by_cat.keys(), key=lambda c: len(items_by_cat[c]), reverse=True):
-        items = items_by_cat[cat]
-        parts.append(f"<h3>{cat} ({len(items)})</h3>")
+        items = sorted(items_by_cat[cat], key=lambda x: x.published, reverse=True)[:MAX_ITEMS_PER_CATEGORY_IN_EMAIL]
+        parts.append(f"<h3>{cat} ({len(items_by_cat[cat])})</h3>")
 
-        summary = ai_exec_summary(cat, items)
-        if not summary:
-            summary = fallback_exec_summary(cat, items)
-            parts.append(f"<p><b>Executive summary:</b> {summary}</p>")
-        else:
-            # keep formatting readable
-            summary = summary.replace("Summary:", "<b>Executive summary:</b>").replace("Notable:", "<br><b>Notable:</b>")
-            parts.append(f"<p>{summary}</p>")
+        # Executive summary (category-level)
+        ex = exec_summaries.get(cat, "").strip()
+        if ex:
+            ex = ex.replace("Summary:", "<b>Executive summary:</b>").replace("Notable:", "<br><b>Notable:</b>")
+            parts.append(f"<p>{ex}</p>")
 
         parts.append("<ul>")
-        for it in sorted(items, key=lambda x: x.published, reverse=True)[:40]:
+        for it in items:
             d = it.published.astimezone(ET).strftime("%b %d, %Y")
+            s = article_summaries.get(it.url, "").strip()
+            s_html = f"<br><span style='color:#444'>{s}</span>" if s else ""
             parts.append(
-                f'<li><b>{d}</b> — <a href="{it.url}">{it.title}</a> '
-                f'<i>({it.source})</i></li>'
+                f"<li><b>{d}</b> — <a href=\"{it.url}\">{it.title}</a> "
+                f"<i>({it.source})</i>{s_html}</li>"
             )
         parts.append("</ul>")
 
@@ -438,7 +466,6 @@ def send_email(subject: str, html_body: str):
 
     from_email = os.environ.get("FROM_EMAIL", username).strip()
 
-    # Multiple recipients supported via comma-separated TO_EMAIL
     to_emails_raw = os.environ["TO_EMAIL"].strip()
     to_emails = [e.strip() for e in to_emails_raw.split(",") if e.strip()]
     if not to_emails:
@@ -464,18 +491,43 @@ def main():
     before = len(items)
     items = [it for it in items if is_strict_us_rvpark(it)]
     after = len(items)
-
     print(f"Collected {before} items; {after} passed strict US RV-park filter.")
 
+    # Categorize
     buckets: Dict[str, List[Item]] = {}
     for it in items:
         for c in categorize(it):
             buckets.setdefault(c, []).append(it)
 
-    subject = f"Athena RV Park Weekly Digest (US-only, strict) — {datetime.now(tz=ET).strftime('%b %d, %Y')}"
-    html = build_email_html(buckets)
-    send_email(subject, html)
+    # AI client
+    client = get_openai_client()
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
 
+    exec_summaries: Dict[str, str] = {}
+    article_summaries: Dict[str, str] = {}
+
+    if client is None:
+        print("[WARN] OPENAI_API_KEY missing; AI summaries disabled.")
+    else:
+        # Category exec summaries (one call per category)
+        for cat, its in buckets.items():
+            s = ai_exec_summary(cat, its, client, model)
+            if s:
+                exec_summaries[cat] = s
+
+        # Per-article summaries: summarize each unique URL once, in batches
+        unique_items = list({it.url: it for it in items}.values())
+        # Prefer important/recent items first (helps if you later cap)
+        unique_items = sorted(unique_items, key=lambda x: (importance_score(x), x.published), reverse=True)
+
+        for batch in chunked(unique_items, AI_ARTICLE_BATCH_SIZE):
+            article_summaries.update(ai_article_summaries(batch, client, model))
+
+        print(f"AI summarized {len(article_summaries)}/{len(unique_items)} unique articles.")
+
+    subject = f"Athena RV Park Weekly Digest (US-only, strict) — {datetime.now(tz=ET).strftime('%b %d, %Y')}"
+    html = build_email_html(buckets, exec_summaries, article_summaries)
+    send_email(subject, html)
     print(f"Sent digest with {after} filtered items across {len(buckets)} categories.")
 
 
