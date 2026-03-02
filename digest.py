@@ -1,4 +1,3 @@
-# digest.py
 import os
 import re
 import ssl
@@ -9,6 +8,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional, Dict
 from urllib.parse import urljoin
+from collections import Counter
 
 import pytz
 import requests
@@ -18,8 +18,7 @@ from dateutil import parser as dtparser
 
 from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
-# OpenAI (Responses API)
-from openai import OpenAI  # requires openai>=1.0.0 (pip install openai)
+from openai import OpenAI  # requires openai>=1.0.0
 
 ET = pytz.timezone("America/New_York")
 
@@ -33,7 +32,9 @@ class Item:
     summary: str = ""
 
 
-# STRICT RV PARK FILTER
+# ----------------------------
+# STRICT RV-PARK + US FILTER
+# ----------------------------
 
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
@@ -45,6 +46,7 @@ MUST_HAVE_ANY = [
 ]
 
 REJECT_IF_ANY = [
+    # RV vehicle / travel content
     "travel trailer", "fifth wheel", "motorhome", "pickup truck", "tow vehicle",
     "airstream", "campervan", "van life", "vanlife",
     "rv review", "rv show", "rv expo", "dealership", "dealer",
@@ -52,8 +54,9 @@ REJECT_IF_ANY = [
     "best rv", "top rv", "rv tips", "rv maintenance",
 ]
 
+# Hard reject non-US geo signals
 NON_US_HINTS = [
-    "australia", "western australia", "queensland", "new south wales", "victoria (aus)",
+    "australia", "western australia", "queensland", "new south wales", "victoria",
     "canada", "ontario", "british columbia", "alberta",
     "united kingdom", "uk", "england", "scotland", "wales",
     "ireland", "new zealand",
@@ -104,15 +107,12 @@ def is_strict_us_rvpark(item: Item) -> bool:
     text = (f"{item.title} {item.summary}").lower()
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Hard reject non US signals
     if any(nu in text for nu in NON_US_HINTS):
         return False
 
-    # Must be about RV parks/campgrounds
     if not any(k in text for k in MUST_HAVE_ANY):
         return False
 
-    # Reject RV vehicle / travel 
     if any(bad in text for bad in REJECT_IF_ANY):
         return False
 
@@ -123,7 +123,10 @@ def is_strict_us_rvpark(item: Item) -> bool:
     return True
 
 
+# ----------------------------
 # CATEGORY TAGGING
+# ----------------------------
+
 KEYWORDS = {
     "Acquisitions / For Sale": [
         "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
@@ -147,7 +150,7 @@ KEYWORDS = {
     ],
     "Operations / Industry": [
         "occupancy", "rates", "revenue", "revpar", "reservations",
-        "demand", "development", "expansion"
+        "demand", "development", "expansion", "booking", "reservation"
     ],
     "People / Notable": [
         "ceo", "founder", "appointed", "resigns", "retired",
@@ -165,7 +168,9 @@ def categorize(item: Item) -> List[str]:
     return tags or ["Other"]
 
 
+# ----------------------------
 # FETCH / PARSE HELPERS
+# ----------------------------
 
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
@@ -194,7 +199,7 @@ def parse_rss(source_name: str, url: str) -> List[Item]:
     xml = fetch_url(url)
     feed = feedparser.parse(xml)
     items: List[Item] = []
-    for e in feed.entries[:200]:
+    for e in feed.entries[:220]:
         title = (e.get("title") or "").strip()
         link = (e.get("link") or "").strip()
         published = safe_dt(e.get("published") or e.get("updated"))
@@ -224,10 +229,11 @@ def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
             continue
         if href.startswith("/"):
             href = urljoin(url, href)
+
         if base_host not in href:
             continue
 
-        context = (a.parent.get_text(" ", strip=True) if a.parent else "")[:500]
+        context = (a.parent.get_text(" ", strip=True) if a.parent else "")[:600]
         m = date_regex.search(context)
         if not m:
             continue
@@ -254,7 +260,6 @@ def collect_all(days: int = 7) -> List[Item]:
             elif s["type"] == "html_simple_dates":
                 out.extend(parse_html_simple_dates(s["name"], s["url"]))
             else:
-                # if you have custom parsers for RVBusiness etc, keep them here
                 out.extend(parse_rss(s["name"], s["url"]))
         except Exception as e:
             print(f"[WARN] Failed source {s['name']}: {e}")
@@ -285,18 +290,35 @@ def collect_all(days: int = 7) -> List[Item]:
     return filtered
 
 
-# AI: ONE SUMMARY PER CATEGORY
+# ----------------------------
+# EXECUTIVE SUMMARY PER CATEGORY (AI)
+# ----------------------------
 
-def fallback_category_summary(category: str, items: List[Item]) -> str:
-    """
-    Narrative fallback summary (no AI). Not per-article; category-level themes only.
-    """
+IMPORTANT_TERMS = [
+    "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
+    "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
+    "insurance", "premium", "underwriting", "liability", "claims",
+    "financing", "refinance", "loan", "lender", "debt", "cap rate", "interest rate",
+    "earnings", "guidance", "results", "10-q", "10-k", "8-k",
+    "bankruptcy", "foreclosure", "default",
+]
+
+
+def importance_score(it: Item) -> int:
+    t = (it.title + " " + (it.summary or "")).lower()
+    score = 0
+    for w in IMPORTANT_TERMS:
+        if w in t:
+            score += 2
+    if any(x in t for x in ["sun communities", "sun outdoors", "equity lifestyle", "els", "koa"]):
+        score += 2
+    return score
+
+
+def fallback_exec_summary(category: str, items: List[Item]) -> str:
     if not items:
         return "No notable updates surfaced in this category this week."
-
     text = " ".join((it.title + " " + it.summary) for it in items).lower()
-
-    # Theme flags
     themes = []
     if any(k in text for k in ["for sale", "listed", "broker", "portfolio", "acquired", "acquisition", "transaction", "deal"]):
         themes.append("deal/listing activity")
@@ -308,49 +330,13 @@ def fallback_category_summary(category: str, items: List[Item]) -> str:
         themes.append("financing/markets")
     if any(k in text for k in ["earnings", "guidance", "conference call", "10-q", "10-k", "8-k", "sec"]):
         themes.append("public-company/earnings commentary")
-    if any(k in text for k in ["upgrade", "renovation", "expansion", "opens", "new", "booking", "reservation"]):
+    if any(k in text for k in ["upgrade", "renovation", "expansion", "opens", "booking", "reservation"]):
         themes.append("operator/operations updates")
+    theme_txt = ", ".join(themes) if themes else "general US RV park / campground updates"
+    return f"Headlines this week point to {theme_txt}, with a mix of operator and market developments."
 
-    # State mentions (best-effort)
-    found_states = []
-    for it in items:
-        t = " " + it.title.upper() + " "
-        for ab in STATE_ABBR:
-            if f", {ab} " in t or f"({ab})" in t:
-                found_states.append(ab)
 
-    states = []
-    if found_states:
-        # top 3 most mentioned
-        from collections import Counter
-        states = [s for s, _ in Counter(found_states).most_common(3)]
-
-    theme_txt = ", ".join(themes) if themes else "general RV park / campground updates"
-    state_txt = f" Key locations mentioned: {', '.join(states)}." if states else ""
-
-    return f"This week’s headlines suggest {theme_txt}.{state_txt}"
-
-IMPORTANT_TERMS = [
-    "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
-    "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
-    "insurance", "premium", "underwriting", "liability", "claims",
-    "financing", "refinance", "loan", "lender", "debt", "cap rate", "interest rate",
-    "earnings", "guidance", "results", "10-q", "10-k", "8-k",
-    "bankruptcy", "foreclosure", "default",
-]
-
-def importance_score(it: Item) -> int:
-    t = (it.title + " " + (it.summary or "")).lower()
-    score = 0
-    for w in IMPORTANT_TERMS:
-        if w in t:
-            score += 2
-    # slight bump for major operators
-    if any(x in t for x in ["sun communities", "sun outdoors", "equity lifestyle", "els", "koa"]):
-        score += 2
-    return score
-
-def ai_category_summary(category: str, items: List[Item]) -> str:
+def ai_exec_summary(category: str, items: List[Item]) -> str:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         print("[WARN] OPENAI_API_KEY missing; AI summaries disabled.")
@@ -359,33 +345,29 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
     model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip()
     client = OpenAI(api_key=api_key)
 
-    # Pick top headlines by importance
     ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
+    top = ranked[:10]
 
-    # Keep inputs small but informative
-    top = ranked[:10]  # model should infer themes from these
     lines = []
     for it in top:
         d = it.published.astimezone(ET).strftime("%b %d")
-        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())
-        snippet = snippet[:180]
+        snippet = re.sub(r"\s+", " ", (it.summary or "").strip())[:200]
         lines.append(f"- {d} | {it.source} | {it.title} | {snippet}")
 
     prompt = (
         "You are writing an EXECUTIVE SUMMARY for a weekly digest.\n"
-        "Audience: Athena Real Estate (US RV parks / RV resorts / campgrounds).\n"
-        "Scope: STRICTLY US RV park/campground business + real estate + operations + legal + insurance + financing.\n\n"
+        "Audience: Athena Real Estate.\n"
+        "Scope: STRICTLY US RV parks / RV resorts / campgrounds (real estate, ops, legal, insurance, financing).\n\n"
         f"Category: {category}\n\n"
         "Task:\n"
-        "- Write a short executive summary that synthesizes the TOP headlines.\n"
-        "- Do NOT summarize each article.\n\n"
+        "- Synthesize the TOP headlines into a short executive summary.\n"
+        "- Do NOT summarize each article one-by-one.\n\n"
         "Output format (follow exactly):\n"
-        "1) 2–3 sentences that summarize the key developments/themes.\n"
-        "2) Then a line starting with 'Notable:' followed by 1–2 short headline mentions (titles only, no links).\n\n"
+        "Summary: <2–3 sentences, max 55 words>\n"
+        "Notable: <1–2 titles only>\n\n"
         "Rules:\n"
-        "- Max 70 words total.\n"
-        "- Mention states only if clearly supported by the headlines.\n"
-        "- No sources, no links, no fluff, no speculation.\n\n"
+        "- No links. No sources. No fluff. No speculation.\n"
+        "- Mention states only if clearly supported.\n\n"
         "Headlines:\n" + "\n".join(lines)
     )
 
@@ -393,17 +375,19 @@ def ai_category_summary(category: str, items: List[Item]) -> str:
         resp = client.responses.create(
             model=model,
             input=prompt,
-            max_output_tokens=140,
+            max_output_tokens=160,
         )
         text = (resp.output_text or "").strip()
         text = BeautifulSoup(text, "lxml").get_text(" ", strip=True)
         return text
     except Exception as e:
-        print(f"[WARN] AI executive summary failed for '{category}': {e}")
+        print(f"[WARN] AI exec summary failed for '{category}': {e}")
         return ""
 
 
-# EMAIL BUILD / SEND
+# ----------------------------
+# EMAIL BUILD / SEND (MULTI-RECIPIENT)
+# ----------------------------
 
 def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
     now = datetime.now(tz=ET)
@@ -419,18 +403,19 @@ def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
         parts.append("<p><b>No qualifying US RV-park items found this week.</b></p>")
         return "\n".join(parts)
 
-    # Sort categories by item count descending
     for cat in sorted(items_by_cat.keys(), key=lambda c: len(items_by_cat[c]), reverse=True):
         items = items_by_cat[cat]
         parts.append(f"<h3>{cat} ({len(items)})</h3>")
 
-        # AI category summary 
-        summary = ai_category_summary(cat, items)
+        summary = ai_exec_summary(cat, items)
         if not summary:
-            summary = fallback_category_summary(cat, items)
-        parts.append(f"<p><b>Quick summary:</b> {summary}</p>")
+            summary = fallback_exec_summary(cat, items)
+            parts.append(f"<p><b>Executive summary:</b> {summary}</p>")
+        else:
+            # keep formatting readable
+            summary = summary.replace("Summary:", "<b>Executive summary:</b>").replace("Notable:", "<br><b>Notable:</b>")
+            parts.append(f"<p>{summary}</p>")
 
-        # Article list 
         parts.append("<ul>")
         for it in sorted(items, key=lambda x: x.published, reverse=True)[:40]:
             d = it.published.astimezone(ET).strftime("%b %d, %Y")
@@ -451,22 +436,27 @@ def send_email(subject: str, html_body: str):
     username = os.environ["SMTP_USERNAME"].strip()
     password = os.environ["SMTP_PASSWORD"].strip().replace("\u00A0", "").replace(" ", "")
 
-    to_email = os.environ["TO_EMAIL"].strip()
     from_email = os.environ.get("FROM_EMAIL", username).strip()
+
+    # Multiple recipients supported via comma-separated TO_EMAIL
+    to_emails_raw = os.environ["TO_EMAIL"].strip()
+    to_emails = [e.strip() for e in to_emails_raw.split(",") if e.strip()]
+    if not to_emails:
+        raise RuntimeError("TO_EMAIL is empty. Provide one or more emails, comma-separated.")
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = from_email
-    msg["To"] = to_email
+    msg["To"] = ", ".join(to_emails)
     msg.attach(MIMEText(html_body, "html"))
 
     context = ssl.create_default_context()
     with smtplib.SMTP(smtp_host, smtp_port) as server:
         server.starttls(context=context)
         server.login(username, password)
-        server.sendmail(from_email, [to_email], msg.as_string())
+        server.sendmail(from_email, to_emails, msg.as_string())
 
-    print("EMAIL_SENT_OK")
+    print(f"EMAIL_SENT_OK to {len(to_emails)} recipients")
 
 
 def main():
