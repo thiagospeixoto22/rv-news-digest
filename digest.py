@@ -20,12 +20,10 @@ from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
 ET = pytz.timezone("America/New_York")
 
-# =========================
 # Tunables
-# =========================
 DAYS_BACK = 7
 MAX_ITEMS_PER_CATEGORY_IN_EMAIL = 40   # how many articles shown per category
-ARTICLE_SUMMARY_SENTENCES = 2          # 1 or 2 (your supervisor wants 1-2)
+ARTICLE_SUMMARY_SENTENCES = 2       
 CATEGORY_NOTABLE_COUNT = 2             # 1–2 notable headlines called out per category
 FETCH_TIMEOUT = 35                     # seconds
 FETCH_RETRIES = 2
@@ -40,9 +38,7 @@ class Item:
     summary: str = ""
 
 
-# ----------------------------
 # STRICT RV-PARK + US FILTER
-# ----------------------------
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
     "rv resort", "rv resorts",
@@ -131,9 +127,7 @@ def is_strict_us_rvpark(item: Item) -> bool:
     return True
 
 
-# ----------------------------
 # CATEGORY TAGGING
-# ----------------------------
 KEYWORDS = {
     "Acquisitions / For Sale": [
         "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
@@ -175,9 +169,7 @@ def categorize(item: Item) -> List[str]:
     return tags or ["Other"]
 
 
-# ----------------------------
 # FREE 1–2 SENTENCE ARTICLE SUMMARY
-# ----------------------------
 STOPWORDS = {
     "the","a","an","and","or","to","of","in","for","on","with","from","by","at","as",
     "is","are","was","were","be","been","it","its","this","that","these","those",
@@ -227,9 +219,6 @@ def free_article_summary(title: str, snippet: str, max_sentences: int = 2) -> st
     return out
 
 
-# ----------------------------
-# FREE EXEC SUMMARY PER CATEGORY
-# ----------------------------
 IMPORTANT_TERMS = [
     "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
     "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
@@ -298,9 +287,7 @@ def free_category_exec_summary(category: str, items: List[Item]) -> str:
     return summary, notable
 
 
-# ----------------------------
 # FETCH / PARSE HELPERS
-# ----------------------------
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -470,9 +457,7 @@ def collect_all(days: int = 7) -> List[Item]:
     return filtered
 
 
-# ----------------------------
 # EMAIL BUILD / SEND (MULTI-RECIPIENT)
-# ----------------------------
 def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
     now = datetime.now(tz=ET)
     start = (now - timedelta(days=DAYS_BACK)).strftime("%b %d, %Y")
