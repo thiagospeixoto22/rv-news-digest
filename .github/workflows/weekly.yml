@@ -3,9 +3,10 @@ name: Weekly RV Digest
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 13 * * 5"
-    - cron: "0 14 * * 5"
-
+    # Run at both 13:00 and 14:00 UTC on Tue/Fri, and let the script only send at 9am ET (DST-safe).
+    - cron: "0 13 * * 2,5"
+    - cron: "0 14 * * 2,5"
+    
 jobs:
   run-digest:
     runs-on: ubuntu-latest
