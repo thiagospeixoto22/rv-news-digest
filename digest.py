@@ -9,6 +9,7 @@ from email.mime.text import MIMEText
 from typing import List, Optional, Dict
 from urllib.parse import urljoin
 from collections import Counter
+from zoneinfo import ZoneInfo
 
 import pytz
 import requests
@@ -20,13 +21,52 @@ from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
 ET = pytz.timezone("America/New_York")
 
+# =========================
+# Scheduling (Tue/Fri @ 9am ET)
+# =========================
+SEND_WEEKDAYS = {1, 4}   # Tue=1, Fri=4
+SEND_HOUR_ET = 9         # 9am ET
+
+def should_send_now() -> bool:
+    """
+    Returns True only at Tue/Fri 9am ET.
+    Set env FORCE_SEND=1 to bypass for manual tests.
+    """
+    if os.environ.get("FORCE_SEND", "").strip() == "1":
+        return True
+    now = datetime.now(ZoneInfo("America/New_York"))
+    return (now.weekday() in SEND_WEEKDAYS) and (now.hour == SEND_HOUR_ET)
+
+def effective_days_back() -> int:
+    """
+    Tue digest should cover since Friday (~4 days).
+    Fri digest should cover since Tuesday (~3 days).
+    You can override with DAYS_BACK_OVERRIDE env var if desired.
+    """
+    override = os.environ.get("DAYS_BACK_OVERRIDE", "").strip()
+    if override.isdigit():
+        return int(override)
+
+    now = datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() == 1:  # Tuesday
+        return 4
+    if now.weekday() == 4:  # Friday
+        return 3
+    return 7
+
+
+# =========================
 # Tunables
-DAYS_BACK = 7
-MAX_ITEMS_PER_CATEGORY_IN_EMAIL = 40   # how many articles shown per category
-ARTICLE_SUMMARY_SENTENCES = 2       
-CATEGORY_NOTABLE_COUNT = 2             # 1–2 notable headlines called out per category
-FETCH_TIMEOUT = 35                     # seconds
+# =========================
+MAX_ITEMS_PER_CATEGORY_IN_EMAIL = 40
+ARTICLE_SUMMARY_SENTENCES = 2
+CATEGORY_NOTABLE_COUNT = 2
+FETCH_TIMEOUT = 35
 FETCH_RETRIES = 2
+
+# Dedupe tuning (higher = stricter duplicate match)
+DEDUP_JACCARD_THRESHOLD = 0.92
+DEDUP_MIN_SHARED_TOKENS = 5
 
 
 @dataclass
@@ -38,7 +78,9 @@ class Item:
     summary: str = ""
 
 
+# ----------------------------
 # STRICT RV-PARK + US FILTER
+# ----------------------------
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
     "rv resort", "rv resorts",
@@ -49,7 +91,6 @@ MUST_HAVE_ANY = [
 ]
 
 REJECT_IF_ANY = [
-    # RV vehicle / travel content (not RV parks)
     "travel trailer", "fifth wheel", "motorhome", "pickup truck", "tow vehicle",
     "airstream", "campervan", "van life", "vanlife",
     "rv review", "rv show", "rv expo", "dealership", "dealer",
@@ -57,7 +98,6 @@ REJECT_IF_ANY = [
     "best rv", "top rv", "rv tips", "rv maintenance",
 ]
 
-# Hard reject obvious non-US geo signals
 NON_US_HINTS = [
     "australia", "western australia", "queensland", "new south wales", "victoria",
     "canada", "ontario", "british columbia", "alberta",
@@ -78,7 +118,6 @@ US_HINTS = [
     "united states", "u.s.", "usa", "american",
     "county", "city of", "state of",
 ] + [
-    # state names
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado",
     "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho",
     "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana",
@@ -112,14 +151,11 @@ def is_strict_us_rvpark(item: Item) -> bool:
 
     if any(nu in text for nu in NON_US_HINTS):
         return False
-
     if not any(k in text for k in MUST_HAVE_ANY):
         return False
-
     if any(bad in text for bad in REJECT_IF_ANY):
         return False
 
-    # US-only requirement (unless it’s a known US operator mention)
     if not any(op in text for op in US_OPERATOR_OK):
         if not any(h in text for h in US_HINTS) and not has_state_abbr(text):
             return False
@@ -127,7 +163,9 @@ def is_strict_us_rvpark(item: Item) -> bool:
     return True
 
 
+# ----------------------------
 # CATEGORY TAGGING
+# ----------------------------
 KEYWORDS = {
     "Acquisitions / For Sale": [
         "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
@@ -169,12 +207,13 @@ def categorize(item: Item) -> List[str]:
     return tags or ["Other"]
 
 
+# ----------------------------
 # FREE 1–2 SENTENCE ARTICLE SUMMARY
+# ----------------------------
 STOPWORDS = {
     "the","a","an","and","or","to","of","in","for","on","with","from","by","at","as",
     "is","are","was","were","be","been","it","its","this","that","these","those",
     "will","after","before","about","over","into","new","news","says","report","reports",
-    # RV-park common terms (don’t let these dominate scoring)
     "rv","park","parks","campground","campgrounds","resort","resorts"
 }
 
@@ -183,21 +222,15 @@ def split_sentences(text: str) -> List[str]:
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text:
         return []
-    # simple sentence split (good enough for snippets)
     sents = re.split(r"(?<=[.!?])\s+", text)
     return [s.strip() for s in sents if len(s.strip()) >= 25]
 
 
 def free_article_summary(title: str, snippet: str, max_sentences: int = 2) -> str:
-    """
-    Picks the most informative 1–2 sentences from the RSS snippet (extractive).
-    If snippet is thin, uses a cautious template.
-    """
     snippet = BeautifulSoup(snippet or "", "lxml").get_text(" ", strip=True)
     sents = split_sentences(snippet)
 
     if not sents:
-        # conservative fallback
         clean_title = re.sub(r"\s+", " ", (title or "").strip())
         return f"Headline indicates: {clean_title}."
 
@@ -211,14 +244,14 @@ def free_article_summary(title: str, snippet: str, max_sentences: int = 2) -> st
         scored.append((score, i, s))
 
     top = sorted(scored, key=lambda x: x[0], reverse=True)[:max_sentences]
-    top = sorted(top, key=lambda x: x[1])  # preserve original order
+    top = sorted(top, key=lambda x: x[1])
     out = " ".join(t[2] for t in top).strip()
-
-    # keep it tight
-    out = out[:420].rstrip()
-    return out
+    return out[:420].rstrip()
 
 
+# ----------------------------
+# FREE EXEC SUMMARY PER CATEGORY
+# ----------------------------
 IMPORTANT_TERMS = [
     "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
     "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
@@ -241,15 +274,10 @@ def importance_score(it: Item) -> int:
 
 
 def free_category_exec_summary(category: str, items: List[Item]) -> str:
-    """
-    2–3 sentence executive-ish category summary without AI.
-    Uses lightweight theme detection + top notable headlines.
-    """
     if not items:
         return "No notable updates surfaced in this category this week.", []
 
     text = " ".join((it.title + " " + it.summary) for it in items).lower()
-
     themes = []
     if any(k in text for k in ["for sale", "listed", "broker", "portfolio", "acquired", "acquisition", "transaction", "deal"]):
         themes.append("deal/listing activity")
@@ -266,7 +294,6 @@ def free_category_exec_summary(category: str, items: List[Item]) -> str:
 
     theme_txt = ", ".join(themes) if themes else "general US RV park/campground updates"
 
-    # find most mentioned states (best-effort)
     state_mentions = []
     for it in items:
         t = " " + it.title.upper() + " "
@@ -283,11 +310,92 @@ def free_category_exec_summary(category: str, items: List[Item]) -> str:
 
     ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
     notable = [it.title for it in ranked[:CATEGORY_NOTABLE_COUNT]]
-
     return summary, notable
 
 
+# ----------------------------
+# Cross-source duplicate removal (same story, different links)
+# ----------------------------
+TITLE_STOPWORDS = {
+    "the","a","an","and","or","to","of","in","for","on","with","from","by","at","as",
+    "is","are","was","were","be","been","this","that","these","those","will",
+}
+
+def normalize_title(title: str) -> str:
+    t = BeautifulSoup(title or "", "lxml").get_text(" ", strip=True)
+    # Remove trailing " - Publisher" patterns (very common in RSS)
+    t = re.sub(r"\s+-\s+[^-]{2,}$", "", t).strip()
+    t = t.lower()
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+def title_tokens(norm_title: str) -> set:
+    toks = [w for w in norm_title.split() if w and w not in TITLE_STOPWORDS]
+    return set(toks)
+
+def jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    u = a | b
+    if not u:
+        return 0.0
+    return len(a & b) / len(u)
+
+def source_priority(it: Item) -> int:
+    # Prefer non-Google versions and versions with richer summaries
+    s = (it.source or "").lower()
+    pri = 0
+    if "google news" in s:
+        pri -= 5
+    if "press release" in s or "investor" in s:
+        pri += 1
+    pri += min(len(it.summary or ""), 400) // 200  # small bump for longer snippets
+    return pri
+
+def dedupe_cross_source(items: List[Item]) -> List[Item]:
+    """
+    Removes duplicates where the same story appears from different sources/links.
+    Strategy: keep the best version first (non-Google + longer snippet), then drop near-duplicates.
+    """
+    # Sort by best candidate first
+    items_sorted = sorted(
+        items,
+        key=lambda it: (it.published, source_priority(it)),
+        reverse=True,
+    )
+
+    kept: List[Item] = []
+    kept_norm: List[str] = []
+    kept_tok: List[set] = []
+
+    for it in items_sorted:
+        nt = normalize_title(it.title)
+        tt = title_tokens(nt)
+
+        # exact normalized title match
+        if nt in kept_norm:
+            continue
+
+        dup = False
+        for existing_tokens in kept_tok:
+            sim = jaccard(tt, existing_tokens)
+            if sim >= DEDUP_JACCARD_THRESHOLD and len(tt & existing_tokens) >= DEDUP_MIN_SHARED_TOKENS:
+                dup = True
+                break
+
+        if not dup:
+            kept.append(it)
+            kept_norm.append(nt)
+            kept_tok.append(tt)
+
+    # Return in time order (newest first) for email
+    return sorted(kept, key=lambda it: it.published, reverse=True)
+
+
+# ----------------------------
 # FETCH / PARSE HELPERS
+# ----------------------------
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -311,7 +419,7 @@ def fetch_url(url: str) -> str:
         "Accept-Language": "en-US,en;q=0.9",
     }
     last_err = None
-    for attempt in range(FETCH_RETRIES + 1):
+    for _ in range(FETCH_RETRIES + 1):
         try:
             r = requests.get(url, headers=headers, timeout=FETCH_TIMEOUT)
             r.raise_for_status()
@@ -374,62 +482,20 @@ def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
     return list(uniq.values())
 
 
-def parse_html_rvbusiness(source_name: str, url: str) -> List[Item]:
-    html = fetch_url(url)
-    soup = BeautifulSoup(html, "lxml")
-    items: List[Item] = []
-
-    date_re = re.compile(
-        r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}"
-    )
-
-    for a in soup.select("a"):
-        href = a.get("href") or ""
-        text = a.get_text(" ", strip=True)
-        if not href or not text:
-            continue
-        if href.startswith("/"):
-            href = urljoin(url, href)
-        if "rvbusiness.com" not in href:
-            continue
-        if len(text) < 12:
-            continue
-
-        parent_text = a.parent.get_text(" ", strip=True) if a.parent else ""
-        m = date_re.search(parent_text)
-        if not m:
-            continue
-        published = safe_dt(m.group(0))
-        if not published:
-            continue
-
-        items.append(Item(source=source_name, title=text, url=href, published=published, summary=""))
-
-    uniq: Dict[str, Item] = {}
-    for it in items:
-        uniq[it.url] = it
-    return list(uniq.values())
-
-
-def collect_all(days: int = 7) -> List[Item]:
+def collect_all(days: int) -> List[Item]:
     out: List[Item] = []
 
-    # Pull from direct sources in sources.py
     for s in SOURCES:
         try:
             if s["type"] == "rss":
                 out.extend(parse_rss(s["name"], s["url"]))
             elif s["type"] == "html_simple_dates":
                 out.extend(parse_html_simple_dates(s["name"], s["url"]))
-            elif s["type"] == "html_rvbusiness":
-                out.extend(parse_html_rvbusiness(s["name"], s["url"]))
             else:
-                # fallback: try as rss
                 out.extend(parse_rss(s["name"], s["url"]))
         except Exception as e:
             print(f"[WARN] Failed source {s['name']}: {e}")
 
-    # Google News RSS searches
     for q in GOOGLE_NEWS_QUERIES:
         try:
             url = google_news_rss_url(q["q"])
@@ -437,7 +503,6 @@ def collect_all(days: int = 7) -> List[Item]:
         except Exception as e:
             print(f"[WARN] Failed Google News query {q['name']}: {e}")
 
-    # Normalize times + filter by date window + dedupe
     filtered: List[Item] = []
     seen = set()
 
@@ -457,27 +522,27 @@ def collect_all(days: int = 7) -> List[Item]:
     return filtered
 
 
+# ----------------------------
 # EMAIL BUILD / SEND (MULTI-RECIPIENT)
-def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
+# ----------------------------
+def build_email_html(items_by_cat: Dict[str, List[Item]], days_back: int) -> str:
     now = datetime.now(tz=ET)
-    start = (now - timedelta(days=DAYS_BACK)).strftime("%b %d, %Y")
+    start = (now - timedelta(days=days_back)).strftime("%b %d, %Y")
     end = now.strftime("%b %d, %Y")
 
     parts = [
-        "<h2>Athena RV Park Weekly Digest (US-only, strict)</h2>",
+        "<h2>Athena RV Park Digest (US-only, strict)</h2>",
         f"<p><b>Window:</b> {start} – {end}</p>",
     ]
 
     if not items_by_cat:
-        parts.append("<p><b>No qualifying US RV-park items found this week.</b></p>")
+        parts.append("<p><b>No qualifying US RV-park items found in this window.</b></p>")
         return "\n".join(parts)
 
-    # show biggest categories first
     for cat in sorted(items_by_cat.keys(), key=lambda c: len(items_by_cat[c]), reverse=True):
         items = sorted(items_by_cat[cat], key=lambda x: x.published, reverse=True)
         parts.append(f"<h3>{cat} ({len(items)})</h3>")
 
-        # Free exec summary + notable
         exec_sum, notable = free_category_exec_summary(cat, items)
         notable_html = ""
         if notable:
@@ -496,7 +561,7 @@ def build_email_html(items_by_cat: Dict[str, List[Item]]) -> str:
             )
         parts.append("</ul>")
 
-    parts.append("<p style='color:#666;font-size:12px'>Automated weekly digest via GitHub Actions.</p>")
+    parts.append("<p style='color:#666;font-size:12px'>Automated via GitHub Actions.</p>")
     return "\n".join(parts)
 
 
@@ -506,10 +571,8 @@ def send_email(subject: str, html_body: str):
 
     username = os.environ["SMTP_USERNAME"].strip()
     password = os.environ["SMTP_PASSWORD"].strip().replace("\u00A0", "").replace(" ", "")
-
     from_email = os.environ.get("FROM_EMAIL", username).strip()
 
-    # Multiple recipients supported via comma-separated TO_EMAIL
     to_emails_raw = os.environ["TO_EMAIL"].strip()
     to_emails = [e.strip() for e in to_emails_raw.split(",") if e.strip()]
     if not to_emails:
@@ -531,23 +594,33 @@ def send_email(subject: str, html_body: str):
 
 
 def main():
-    items = collect_all(days=DAYS_BACK)
+    if not should_send_now():
+        print("Not scheduled send time (Tue/Fri @ 9am ET). Set FORCE_SEND=1 to test.")
+        return
 
+    days_back = effective_days_back()
+
+    items = collect_all(days=days_back)
     before = len(items)
+
     items = [it for it in items if is_strict_us_rvpark(it)]
-    after = len(items)
-    print(f"Collected {before} items; {after} passed strict US RV-park filter.")
+    after_filter = len(items)
+
+    items = dedupe_cross_source(items)
+    after_dedupe = len(items)
+
+    print(f"Collected {before} items; {after_filter} passed strict filter; {after_dedupe} after cross-source dedupe.")
 
     buckets: Dict[str, List[Item]] = {}
     for it in items:
         for c in categorize(it):
             buckets.setdefault(c, []).append(it)
 
-    subject = f"Athena RV Park Weekly Digest (US-only, strict) — {datetime.now(tz=ET).strftime('%b %d, %Y')}"
-    html = build_email_html(buckets)
+    subject = f"Athena RV Park Digest (US-only, strict) — {datetime.now(tz=ET).strftime('%b %d, %Y')}"
+    html = build_email_html(buckets, days_back=days_back)
     send_email(subject, html)
 
-    print(f"Sent digest with {after} filtered items across {len(buckets)} categories.")
+    print(f"Sent digest with {after_dedupe} items across {len(buckets)} categories.")
 
 
 if __name__ == "__main__":
