@@ -39,9 +39,9 @@ def should_send_now() -> bool:
 
 def effective_days_back() -> int:
     """
-    Tue digest should cover since Friday (~4 days).
-    Fri digest should cover since Tuesday (~3 days).
-    You can override with DAYS_BACK_OVERRIDE env var if desired.
+    Tue digest covers since Friday (~4 days).
+    Fri digest covers since Tuesday (~3 days).
+    Override with DAYS_BACK_OVERRIDE if needed.
     """
     override = os.environ.get("DAYS_BACK_OVERRIDE", "").strip()
     if override.isdigit():
@@ -91,6 +91,7 @@ MUST_HAVE_ANY = [
 ]
 
 REJECT_IF_ANY = [
+    # RV vehicle / travel content (not RV parks)
     "travel trailer", "fifth wheel", "motorhome", "pickup truck", "tow vehicle",
     "airstream", "campervan", "van life", "vanlife",
     "rv review", "rv show", "rv expo", "dealership", "dealer",
@@ -156,6 +157,7 @@ def is_strict_us_rvpark(item: Item) -> bool:
     if any(bad in text for bad in REJECT_IF_ANY):
         return False
 
+    # US-only requirement (unless it’s a known US operator mention)
     if not any(op in text for op in US_OPERATOR_OK):
         if not any(h in text for h in US_HINTS) and not has_state_abbr(text):
             return False
@@ -164,47 +166,118 @@ def is_strict_us_rvpark(item: Item) -> bool:
 
 
 # ----------------------------
-# CATEGORY TAGGING
+# Single best-fit categorization (STRICTER + one category only)
 # ----------------------------
-KEYWORDS = {
-    "Acquisitions / For Sale": [
-        "acquisition", "acquired", "merger", "portfolio", "for sale", "listed",
-        "broker", "transaction", "deal", "sale-leaseback"
-    ],
-    "Insurance / Risk": [
-        "insurance", "insurer", "premium", "underwriting", "liability", "risk",
-        "claim", "wildfire", "flood", "hurricane"
-    ],
-    "Legal / Zoning": [
-        "zoning", "ordinance", "lawsuit", "litigation", "permit",
-        "planning commission", "code enforcement", "injunction"
-    ],
-    "Financing / Markets": [
-        "financing", "refinancing", "loan", "lender", "debt", "cap rate",
-        "interest rate", "bond"
-    ],
-    "Earnings / Public Companies": [
-        "earnings", "guidance", "conference call", "results",
-        "10-q", "10-k", "8-k", "sec filing"
-    ],
-    "Operations / Industry": [
-        "occupancy", "rates", "revenue", "revpar", "reservations",
-        "demand", "development", "expansion", "booking", "reservation"
-    ],
-    "People / Notable": [
-        "ceo", "founder", "appointed", "resigns", "retired",
-        "death", "dies", "passed away", "obituary"
-    ],
+
+# Priority order for ties and display; Other forced last in display
+CATEGORY_PRIORITY = [
+    "Acquisitions / For Sale",
+    "Financing / Markets",
+    "Insurance / Risk",
+    "Legal / Zoning",
+    "Earnings / Public Companies",
+    "Operations / Industry",
+    "People / Notable",
+    "Other",
+]
+
+CATEGORY_RULES = {
+    "Acquisitions / For Sale": {
+        "strong": ["for sale", "portfolio", "acquired", "acquisition", "sold", "sale-leaseback"],
+        "keywords": ["broker", "listing", "listed", "transaction", "deal", "marketed", "buyer", "seller", "closed"],
+        "exclude": ["earnings call", "10-q", "10-k", "8-k"],
+    },
+    "Financing / Markets": {
+        "strong": ["refinance", "refinancing", "loan", "lender", "debt", "credit facility"],
+        "keywords": ["interest rate", "cap rate", "financing", "bond", "cmbs", "maturity", "spread"],
+        "exclude": [],
+    },
+    "Insurance / Risk": {
+        "strong": ["insurance", "insurer", "premium", "underwriting", "policy"],
+        "keywords": ["liability", "coverage", "claims", "risk", "wildfire", "flood", "hurricane"],
+        "exclude": [],
+    },
+    "Legal / Zoning": {
+        "strong": ["lawsuit", "litigation", "zoning", "ordinance", "permit"],
+        "keywords": ["planning commission", "code enforcement", "injunction", "settlement", "sued", "appeal", "regulation"],
+        "exclude": [],
+    },
+    "Earnings / Public Companies": {
+        "strong": ["earnings", "guidance", "results", "conference call", "10-q", "10-k", "8-k"],
+        "keywords": ["sec", "supplemental", "investor", "quarter", "revenue", "noi", "ffo"],
+        "exclude": [],
+    },
+    "Operations / Industry": {
+        "strong": ["occupancy", "reservations", "booking", "demand", "expansion", "development", "construction"],
+        "keywords": ["upgrade", "renovation", "amenities", "opens", "opening", "groundbreaking", "survey", "report", "trend", "rvia"],
+        "exclude": [],
+    },
+    "People / Notable": {
+        "strong": ["passed away", "dies", "died", "death", "obituary"],
+        "keywords": ["appointed", "named", "ceo", "cfo", "president", "founder", "resigns", "retire", "steps down"],
+        "exclude": ["earnings", "10-q", "10-k", "8-k"],  # keep exec quotes in filings from stealing category
+    },
 }
 
+def _score_category(text: str, title: str, cat: str) -> int:
+    """
+    Strict-ish scoring:
+    - strong hits: title +6, body +3
+    - keyword hits: title +3, body +1
+    - exclude hits: -6 (penalty)
+    """
+    rule = CATEGORY_RULES.get(cat, {})
+    strong = rule.get("strong", [])
+    keywords = rule.get("keywords", [])
+    exclude = rule.get("exclude", [])
 
-def categorize(item: Item) -> List[str]:
-    hay = (item.title + " " + item.summary).lower()
-    tags = []
-    for cat, words in KEYWORDS.items():
-        if any(w in hay for w in words):
-            tags.append(cat)
-    return tags or ["Other"]
+    score = 0
+
+    for w in strong:
+        if w in title:
+            score += 6
+        elif w in text:
+            score += 3
+
+    for w in keywords:
+        if w in title:
+            score += 3
+        elif w in text:
+            score += 1
+
+    for w in exclude:
+        if w in title or w in text:
+            score -= 6
+
+    return score
+
+def best_category(item: Item) -> str:
+    """
+    Assign each item to exactly ONE category (best fit).
+    """
+    title = re.sub(r"\s+", " ", (item.title or "")).strip().lower()
+    text = re.sub(r"\s+", " ", f"{item.title} {item.summary}".lower()).strip()
+
+    scores = {}
+    for cat in CATEGORY_RULES.keys():
+        scores[cat] = _score_category(text=text, title=title, cat=cat)
+
+    # choose best
+    best_cat = max(scores.keys(), key=lambda c: scores[c])
+    best_score = scores[best_cat]
+
+    # If nothing matched meaningfully, use Other.
+    # Keep threshold low so relevant items don't get dumped.
+    if best_score < 2:
+        return "Other"
+
+    # Tie-breaker: if multiple have same score, pick earlier priority
+    tied = [c for c, s in scores.items() if s == best_score]
+    if len(tied) > 1:
+        tied.sort(key=lambda c: CATEGORY_PRIORITY.index(c) if c in CATEGORY_PRIORITY else 999)
+        return tied[0]
+
+    return best_cat
 
 
 # ----------------------------
@@ -217,14 +290,12 @@ STOPWORDS = {
     "rv","park","parks","campground","campgrounds","resort","resorts"
 }
 
-
 def split_sentences(text: str) -> List[str]:
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text:
         return []
     sents = re.split(r"(?<=[.!?])\s+", text)
     return [s.strip() for s in sents if len(s.strip()) >= 25]
-
 
 def free_article_summary(title: str, snippet: str, max_sentences: int = 2) -> str:
     snippet = BeautifulSoup(snippet or "", "lxml").get_text(" ", strip=True)
@@ -261,7 +332,6 @@ IMPORTANT_TERMS = [
     "bankruptcy", "foreclosure", "default",
 ]
 
-
 def importance_score(it: Item) -> int:
     t = (it.title + " " + (it.summary or "")).lower()
     score = 0
@@ -272,27 +342,29 @@ def importance_score(it: Item) -> int:
         score += 2
     return score
 
-
 def free_category_exec_summary(category: str, items: List[Item]) -> str:
     if not items:
-        return "No notable updates surfaced in this category this week.", []
+        return "No notable updates surfaced in this category this window.", []
 
     text = " ".join((it.title + " " + it.summary) for it in items).lower()
-    themes = []
-    if any(k in text for k in ["for sale", "listed", "broker", "portfolio", "acquired", "acquisition", "transaction", "deal"]):
-        themes.append("deal/listing activity")
-    if any(k in text for k in ["insurance", "premium", "underwriting", "liability", "claims", "risk"]):
-        themes.append("insurance pressure/risk")
-    if any(k in text for k in ["lawsuit", "litigation", "zoning", "ordinance", "permit", "planning commission", "code enforcement"]):
-        themes.append("legal/zoning actions")
-    if any(k in text for k in ["financing", "loan", "lender", "refinance", "debt", "cap rate", "interest rate"]):
-        themes.append("financing/markets")
-    if any(k in text for k in ["earnings", "guidance", "conference call", "10-q", "10-k", "8-k", "sec"]):
-        themes.append("public-company/earnings signals")
-    if any(k in text for k in ["upgrade", "renovation", "expansion", "opens", "booking", "reservation", "occupancy"]):
-        themes.append("operator/operations updates")
 
-    theme_txt = ", ".join(themes) if themes else "general US RV park/campground updates"
+    themes = []
+    if category == "Acquisitions / For Sale":
+        themes.append("deal/listing activity (acquisitions, sales, or broker listings)")
+    elif category == "Financing / Markets":
+        themes.append("financing/refi dynamics (loans, rates, debt, cap rates)")
+    elif category == "Insurance / Risk":
+        themes.append("insurance market / risk items (premiums, coverage, claims, weather risk)")
+    elif category == "Legal / Zoning":
+        themes.append("local legal/zoning actions affecting RV parks/campgrounds")
+    elif category == "Earnings / Public Companies":
+        themes.append("public-company commentary touching outdoor hospitality / RV operations")
+    elif category == "Operations / Industry":
+        themes.append("operations & industry signals (occupancy, demand, expansion, trends)")
+    elif category == "People / Notable":
+        themes.append("notable leadership / people updates relevant to the industry")
+    else:
+        themes.append("miscellaneous RV park/campground items that didn’t fit other buckets cleanly")
 
     state_mentions = []
     for it in items:
@@ -304,8 +376,8 @@ def free_category_exec_summary(category: str, items: List[Item]) -> str:
     states_txt = f" Mentions clustered around {', '.join(top_states)}." if top_states else ""
 
     summary = (
-        f"Headlines in this category point to {theme_txt}{states_txt} "
-        f"Key items below may be worth a quick scan for owner/operator impact."
+        f"Headlines indicate {themes[0]}{states_txt} "
+        f"Items below include the most relevant updates in this category."
     )
 
     ranked = sorted(items, key=lambda x: (importance_score(x), x.published), reverse=True)
@@ -323,8 +395,7 @@ TITLE_STOPWORDS = {
 
 def normalize_title(title: str) -> str:
     t = BeautifulSoup(title or "", "lxml").get_text(" ", strip=True)
-    # Remove trailing " - Publisher" patterns (very common in RSS)
-    t = re.sub(r"\s+-\s+[^-]{2,}$", "", t).strip()
+    t = re.sub(r"\s+-\s+[^-]{2,}$", "", t).strip()  # drop trailing " - Publisher"
     t = t.lower()
     t = re.sub(r"[^a-z0-9\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
@@ -343,27 +414,15 @@ def jaccard(a: set, b: set) -> float:
     return len(a & b) / len(u)
 
 def source_priority(it: Item) -> int:
-    # Prefer non-Google versions and versions with richer summaries
     s = (it.source or "").lower()
     pri = 0
     if "google news" in s:
         pri -= 5
-    if "press release" in s or "investor" in s:
-        pri += 1
-    pri += min(len(it.summary or ""), 400) // 200  # small bump for longer snippets
+    pri += min(len(it.summary or ""), 400) // 200
     return pri
 
 def dedupe_cross_source(items: List[Item]) -> List[Item]:
-    """
-    Removes duplicates where the same story appears from different sources/links.
-    Strategy: keep the best version first (non-Google + longer snippet), then drop near-duplicates.
-    """
-    # Sort by best candidate first
-    items_sorted = sorted(
-        items,
-        key=lambda it: (it.published, source_priority(it)),
-        reverse=True,
-    )
+    items_sorted = sorted(items, key=lambda it: (it.published, source_priority(it)), reverse=True)
 
     kept: List[Item] = []
     kept_norm: List[str] = []
@@ -373,7 +432,6 @@ def dedupe_cross_source(items: List[Item]) -> List[Item]:
         nt = normalize_title(it.title)
         tt = title_tokens(nt)
 
-        # exact normalized title match
         if nt in kept_norm:
             continue
 
@@ -389,7 +447,6 @@ def dedupe_cross_source(items: List[Item]) -> List[Item]:
             kept_norm.append(nt)
             kept_tok.append(tt)
 
-    # Return in time order (newest first) for email
     return sorted(kept, key=lambda it: it.published, reverse=True)
 
 
@@ -404,13 +461,11 @@ def safe_dt(s: Optional[str]) -> Optional[datetime]:
     except Exception:
         return None
 
-
 def within_days(dt: datetime, days: int) -> bool:
     now = datetime.now(tz=ET)
     if dt.tzinfo is None:
         dt = ET.localize(dt)
     return dt >= (now - timedelta(days=days))
-
 
 def fetch_url(url: str) -> str:
     headers = {
@@ -428,7 +483,6 @@ def fetch_url(url: str) -> str:
             last_err = e
     raise last_err
 
-
 def parse_rss(source_name: str, url: str) -> List[Item]:
     xml = fetch_url(url)
     feed = feedparser.parse(xml)
@@ -443,7 +497,6 @@ def parse_rss(source_name: str, url: str) -> List[Item]:
         summary = BeautifulSoup(summary_html, "lxml").get_text(" ", strip=True)
         items.append(Item(source=source_name, title=title, url=link, published=published, summary=summary))
     return items
-
 
 def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
     html = fetch_url(url)
@@ -480,7 +533,6 @@ def parse_html_simple_dates(source_name: str, url: str) -> List[Item]:
     for it in items:
         uniq[it.url] = it
     return list(uniq.values())
-
 
 def collect_all(days: int) -> List[Item]:
     out: List[Item] = []
@@ -523,8 +575,15 @@ def collect_all(days: int) -> List[Item]:
 
 
 # ----------------------------
-# EMAIL BUILD / SEND (MULTI-RECIPIENT)
+# EMAIL BUILD / SEND (MULTI-RECIPIENT) + text/plain alternative
 # ----------------------------
+def html_to_text(html: str) -> str:
+    # Basic html -> text for deliverability
+    soup = BeautifulSoup(html or "", "lxml")
+    text = soup.get_text("\n", strip=True)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
 def build_email_html(items_by_cat: Dict[str, List[Item]], days_back: int) -> str:
     now = datetime.now(tz=ET)
     start = (now - timedelta(days=days_back)).strftime("%b %d, %Y")
@@ -539,7 +598,10 @@ def build_email_html(items_by_cat: Dict[str, List[Item]], days_back: int) -> str
         parts.append("<p><b>No qualifying US RV-park items found in this window.</b></p>")
         return "\n".join(parts)
 
-    for cat in sorted(items_by_cat.keys(), key=lambda c: len(items_by_cat[c]), reverse=True):
+    # Sort categories by priority; force Other last even if it has many items
+    ordered = sorted(items_by_cat.keys(), key=lambda c: (c == "Other", CATEGORY_PRIORITY.index(c) if c in CATEGORY_PRIORITY else 999))
+
+    for cat in ordered:
         items = sorted(items_by_cat[cat], key=lambda x: x.published, reverse=True)
         parts.append(f"<h3>{cat} ({len(items)})</h3>")
 
@@ -564,7 +626,6 @@ def build_email_html(items_by_cat: Dict[str, List[Item]], days_back: int) -> str
     parts.append("<p style='color:#666;font-size:12px'>Automated via GitHub Actions.</p>")
     return "\n".join(parts)
 
-
 def send_email(subject: str, html_body: str):
     smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
@@ -582,7 +643,12 @@ def send_email(subject: str, html_body: str):
     msg["Subject"] = subject
     msg["From"] = from_email
     msg["To"] = ", ".join(to_emails)
-    msg.attach(MIMEText(html_body, "html"))
+    msg["Reply-To"] = from_email
+
+    # Add text/plain first (deliverability), then HTML
+    text_body = html_to_text(html_body)
+    msg.attach(MIMEText(text_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     context = ssl.create_default_context()
     with smtplib.SMTP(smtp_host, smtp_port) as server:
@@ -611,11 +677,13 @@ def main():
 
     print(f"Collected {before} items; {after_filter} passed strict filter; {after_dedupe} after cross-source dedupe.")
 
+    # Assign ONE best category per item
     buckets: Dict[str, List[Item]] = {}
     for it in items:
-        for c in categorize(it):
-            buckets.setdefault(c, []).append(it)
+        cat = best_category(it)
+        buckets.setdefault(cat, []).append(it)
 
+    # If Other is empty, don’t show it (but it will still be last if present)
     subject = f"Athena RV Park Digest (US-only, strict) — {datetime.now(tz=ET).strftime('%b %d, %Y')}"
     html = build_email_html(buckets, days_back=days_back)
     send_email(subject, html)
