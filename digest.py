@@ -21,9 +21,7 @@ from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
 ET = pytz.timezone("America/New_York")
 
-# =========================
 # Scheduling (Tue/Fri @ 9am ET)
-# =========================
 SEND_WEEKDAYS = {1, 4}   # Tue=1, Fri=4
 SEND_HOUR_ET = 9         # 9am ET
 
@@ -55,9 +53,7 @@ def effective_days_back() -> int:
     return 7
 
 
-# =========================
 # Tunables
-# =========================
 MAX_ITEMS_PER_CATEGORY_IN_EMAIL = 40
 ARTICLE_SUMMARY_SENTENCES = 2
 CATEGORY_NOTABLE_COUNT = 2
@@ -78,9 +74,7 @@ class Item:
     summary: str = ""
 
 
-# ----------------------------
 # STRICT RV-PARK + US FILTER
-# ----------------------------
 MUST_HAVE_ANY = [
     "rv park", "rv parks",
     "rv resort", "rv resorts",
@@ -164,10 +158,6 @@ def is_strict_us_rvpark(item: Item) -> bool:
 
     return True
 
-
-# ----------------------------
-# Single best-fit categorization (STRICTER + one category only)
-# ----------------------------
 
 # Priority order for ties and display; Other forced last in display
 CATEGORY_PRIORITY = [
@@ -280,9 +270,7 @@ def best_category(item: Item) -> str:
     return best_cat
 
 
-# ----------------------------
 # FREE 1–2 SENTENCE ARTICLE SUMMARY
-# ----------------------------
 STOPWORDS = {
     "the","a","an","and","or","to","of","in","for","on","with","from","by","at","as",
     "is","are","was","were","be","been","it","its","this","that","these","those",
@@ -320,9 +308,6 @@ def free_article_summary(title: str, snippet: str, max_sentences: int = 2) -> st
     return out[:420].rstrip()
 
 
-# ----------------------------
-# FREE EXEC SUMMARY PER CATEGORY
-# ----------------------------
 IMPORTANT_TERMS = [
     "acquire", "acquisition", "acquired", "portfolio", "transaction", "for sale", "listed",
     "lawsuit", "litigation", "zoning", "ordinance", "permit", "injunction",
@@ -385,9 +370,7 @@ def free_category_exec_summary(category: str, items: List[Item]) -> str:
     return summary, notable
 
 
-# ----------------------------
 # Cross-source duplicate removal (same story, different links)
-# ----------------------------
 TITLE_STOPWORDS = {
     "the","a","an","and","or","to","of","in","for","on","with","from","by","at","as",
     "is","are","was","were","be","been","this","that","these","those","will",
@@ -450,9 +433,7 @@ def dedupe_cross_source(items: List[Item]) -> List[Item]:
     return sorted(kept, key=lambda it: it.published, reverse=True)
 
 
-# ----------------------------
 # FETCH / PARSE HELPERS
-# ----------------------------
 def safe_dt(s: Optional[str]) -> Optional[datetime]:
     if not s:
         return None
@@ -574,9 +555,7 @@ def collect_all(days: int) -> List[Item]:
     return filtered
 
 
-# ----------------------------
 # EMAIL BUILD / SEND (MULTI-RECIPIENT) + text/plain alternative
-# ----------------------------
 def html_to_text(html: str) -> str:
     # Basic html -> text for deliverability
     soup = BeautifulSoup(html or "", "lxml")
