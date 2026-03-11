@@ -23,15 +23,16 @@ ET = pytz.timezone("America/New_York")
 
 # Scheduling - send whenever the schedule job runs
 SEND_WEEKDAYS = {1, 4}  # Tue=1, Fri=4
+EXIT_SENT = 0
+EXIT_SKIPPED = 3
 
 def should_send_now() -> bool:
     """
-    Scheduled runs: send on Tue/Fri even if GitHub runs late (fixes missed sends).
+    Scheduled runs: send on Tue/Fri regardless of exact hour (fixes GitHub delays).
     Manual runs (workflow_dispatch): only send if FORCE_SEND=1.
     """
     event = os.environ.get("GITHUB_EVENT_NAME", "").strip()
 
-    # If you manually click "Run workflow", require FORCE_SEND=1 to actually send.
     if event == "workflow_dispatch":
         return os.environ.get("FORCE_SEND", "").strip() == "1"
 
@@ -643,8 +644,8 @@ def send_email(subject: str, html_body: str):
 
 def main():
     if not should_send_now():
-        print("Not scheduled send time (Tue/Fri @ 9am ET). Set FORCE_SEND=1 to test.")
-        return
+        print("SKIP: Not a Tue/Fri scheduled send (or manual run without FORCE_SEND=1).")
+        raise SystemExit(EXIT_SKIPPED)
 
     days_back = effective_days_back()
 
