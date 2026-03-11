@@ -21,20 +21,23 @@ from sources import SOURCES, GOOGLE_NEWS_QUERIES, google_news_rss_url
 
 ET = pytz.timezone("America/New_York")
 
-# Scheduling (Tue/Fri @ 9am ET)
-SEND_WEEKDAYS = {1, 4}   # Tue=1, Fri=4
-SEND_HOUR_ET = 9         # 9am ET
+# Scheduling - send whenever the schedule job runs
+SEND_WEEKDAYS = {1, 4}  # Tue=1, Fri=4
 
 def should_send_now() -> bool:
     """
-    Returns True only at Tue/Fri 9am ET.
-    Set env FORCE_SEND=1 to bypass for manual tests.
+    Scheduled runs: send on Tue/Fri even if GitHub runs late (fixes missed sends).
+    Manual runs (workflow_dispatch): only send if FORCE_SEND=1.
     """
-    if os.environ.get("FORCE_SEND", "").strip() == "1":
-        return True
-    now = datetime.now(ZoneInfo("America/New_York"))
-    return (now.weekday() in SEND_WEEKDAYS) and (now.hour == SEND_HOUR_ET)
+    event = os.environ.get("GITHUB_EVENT_NAME", "").strip()
 
+    # If you manually click "Run workflow", require FORCE_SEND=1 to actually send.
+    if event == "workflow_dispatch":
+        return os.environ.get("FORCE_SEND", "").strip() == "1"
+
+    now = datetime.now(ZoneInfo("America/New_York"))
+    return now.weekday() in SEND_WEEKDAYS
+    
 def effective_days_back() -> int:
     """
     Tue digest covers since Friday (~4 days).
