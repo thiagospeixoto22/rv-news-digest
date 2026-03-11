@@ -1,14 +1,16 @@
 name: RV Digest
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
+    # Tue + Fri (UTC). We run both 13:00 and 14:00 to cover DST shifts.
     - cron: "0 13 * * 2,5"
     - cron: "0 14 * * 2,5"
 
 jobs:
   run-digest:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,12 +20,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Compute the ET date for a cache key
+      # Compute today's date in America/New_York for the "sent marker" key
       - name: Compute ET date
         id: et
         run: |
@@ -32,25 +34,27 @@ jobs:
           from zoneinfo import ZoneInfo
           import os
           now = datetime.now(ZoneInfo("America/New_York"))
-          out = os.environ["GITHUB_OUTPUT"]
-          with open(out, "a") as f:
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"date={now.strftime('%Y-%m-%d')}\n")
           PY
 
-      # Restore marker: if it exists, we already sent today
+      # If this cache exists, we've already sent a digest for that ET date
       - name: Restore sent marker
         id: sentcache
         uses: actions/cache/restore@v4
         with:
           path: .sent_marker
-          key: sent-${{ steps.et.outputs.date }}
+          key: sent-v2-${{ steps.et.outputs.date }}
 
       - name: Skip if already sent today
         if: steps.sentcache.outputs.cache-hit == 'true'
         run: |
           echo "Already sent for ET date ${{ steps.et.outputs.date }} — skipping."
 
+      # Run the digest only if we haven't already sent today
+      # Capture exit code so we only mark "sent" when the script actually sends (exit 0)
       - name: Run digest
+        id: digest
         if: steps.sentcache.outputs.cache-hit != 'true'
         env:
           SMTP_HOST: smtp.gmail.com
@@ -59,18 +63,34 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          # Uncomment ONLY when you want to test a manual run:
+          # FORCE_SEND: "1"
         run: |
+          set +e
           python digest.py
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          # Exit codes:
+          # 0 = sent
+          # 3 = skipped (not the right day/time or manual run without FORCE_SEND)
+          # anything else = error
+          if [ $code -eq 0 ] || [ $code -eq 3 ]; then
+            exit 0
+          else
+            exit $code
+          fi
 
       - name: Write sent marker
-        if: steps.sentcache.outputs.cache-hit != 'true'
+        if: steps.sentcache.outputs.cache-hit != 'true' && steps.digest.outputs.exit_code == '0'
         run: |
           mkdir -p .sent_marker
           echo "sent" > .sent_marker/sent.txt
 
       - name: Save sent marker
-        if: steps.sentcache.outputs.cache-hit != 'true'
+        if: steps.sentcache.outputs.cache-hit != 'true' && steps.digest.outputs.exit_code == '0'
         uses: actions/cache/save@v4
         with:
           path: .sent_marker
-          key: sent-${{ steps.et.outputs.date }}
+          key: sent-v2-${{ steps.et.outputs.date }}
