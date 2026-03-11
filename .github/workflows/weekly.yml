@@ -1,12 +1,11 @@
-name: Weekly RV Digest
+name: RV Digest
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    # Run at both 13:00 and 14:00 UTC on Tue/Fri, and let the script only send at 9am ET (DST-safe).
     - cron: "0 13 * * 2,5"
     - cron: "0 14 * * 2,5"
-    
+
 jobs:
   run-digest:
     runs-on: ubuntu-latest
@@ -19,12 +18,40 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Compute the ET date for a cache key
+      - name: Compute ET date
+        id: et
+        run: |
+          python - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+          now = datetime.now(ZoneInfo("America/New_York"))
+          out = os.environ["GITHUB_OUTPUT"]
+          with open(out, "a") as f:
+              f.write(f"date={now.strftime('%Y-%m-%d')}\n")
+          PY
+
+      # Restore marker: if it exists, we already sent today
+      - name: Restore sent marker
+        id: sentcache
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent_marker
+          key: sent-${{ steps.et.outputs.date }}
+
+      - name: Skip if already sent today
+        if: steps.sentcache.outputs.cache-hit == 'true'
+        run: |
+          echo "Already sent for ET date ${{ steps.et.outputs.date }} — skipping."
+
       - name: Run digest
+        if: steps.sentcache.outputs.cache-hit != 'true'
         env:
           SMTP_HOST: smtp.gmail.com
           SMTP_PORT: "587"
@@ -32,9 +59,18 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           TO_EMAIL: ${{ secrets.TO_EMAIL }}
           FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: gpt-4o-mini
-
-
         run: |
           python digest.py
+
+      - name: Write sent marker
+        if: steps.sentcache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .sent_marker
+          echo "sent" > .sent_marker/sent.txt
+
+      - name: Save sent marker
+        if: steps.sentcache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .sent_marker
+          key: sent-${{ steps.et.outputs.date }}
