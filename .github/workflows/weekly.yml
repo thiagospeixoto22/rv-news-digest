@@ -65,7 +65,7 @@ jobs:
           FROM_EMAIL: ${{ secrets.FROM_EMAIL }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           # Uncomment ONLY when you want to test a manual run:
-          # FORCE_SEND: "1"
+          FORCE_SEND: "1"
         run: |
           set +e
           python digest.py
